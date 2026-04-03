@@ -153,11 +153,16 @@ struct Flags {
     /// Force regeneration of the SCIP index even if it already exists.
     #[clap(long)]
     force_regenerate: bool,
+    /// Suppress log output (info, warn, debug messages).
+    #[clap(long, short)]
+    quiet: bool,
 }
 
 fn main_impl(args: MainFlags) -> anyhow::Result<()> {
     let MainFlags::WorkspaceUnusedPub(args) = args;
-    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
+    let default_level = if args.quiet { "error" } else { "info" };
+    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or(default_level))
+        .init();
 
     let scip = args
         .scip
@@ -167,7 +172,10 @@ fn main_impl(args: MainFlags) -> anyhow::Result<()> {
         anyhow::bail!("{:?} does not contain a Cargo.toml file", args.workspace);
     }
     if args.force_regenerate && scip.exists() {
-        warn!("Force regeneration requested. Removing existing SCIP file at {:?}", scip);
+        warn!(
+            "Force regeneration requested. Removing existing SCIP file at {:?}",
+            scip
+        );
         std::fs::remove_file(&scip)?;
     }
     if !scip.exists() {
@@ -328,12 +336,10 @@ fn main_impl(args: MainFlags) -> anyhow::Result<()> {
         }
 
         // For struct fields, only report pub fields
-        if info.kind.enum_value() == Ok(Kind::Field) {
-            if def_line < lines.len() {
-                let trimmed = lines[def_line].trim();
-                if !trimmed.starts_with("pub ") && !trimmed.starts_with("pub(") {
-                    symbols_to_remove.insert(&info.symbol);
-                }
+        if info.kind.enum_value() == Ok(Kind::Field) && def_line < lines.len() {
+            let trimmed = lines[def_line].trim();
+            if !trimmed.starts_with("pub ") && !trimmed.starts_with("pub(") {
+                symbols_to_remove.insert(&info.symbol);
             }
         }
     }
