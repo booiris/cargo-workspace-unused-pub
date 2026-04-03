@@ -204,11 +204,18 @@ fn main_impl(args: MainFlags) -> anyhow::Result<()> {
                 kind,
                 Kind::Method
                     | Kind::Function
+                    | Kind::StaticMethod
                     | Kind::Constant
                     | Kind::Struct
                     | Kind::Enum
+                    | Kind::EnumMember
                     | Kind::Trait
                     | Kind::Type
+                    | Kind::TypeAlias
+                    | Kind::Field
+                    | Kind::Macro
+                    | Kind::Union
+                    | Kind::StaticVariable
             ) {
                 continue;
             }
@@ -317,6 +324,17 @@ fn main_impl(args: MainFlags) -> anyhow::Result<()> {
         // Attribute-based test/main check
         if def_line < lines.len() && has_test_or_main_attr(lines, def_line, &info.display_name) {
             symbols_to_remove.insert(&info.symbol);
+            continue;
+        }
+
+        // For struct fields, only report pub fields
+        if info.kind.enum_value() == Ok(Kind::Field) {
+            if def_line < lines.len() {
+                let trimmed = lines[def_line].trim();
+                if !trimmed.starts_with("pub ") && !trimmed.starts_with("pub(") {
+                    symbols_to_remove.insert(&info.symbol);
+                }
+            }
         }
     }
     declarations.retain(|k, _| !symbols_to_remove.contains(k));
@@ -510,11 +528,18 @@ mod tests {
             kind,
             Kind::Method
                 | Kind::Function
+                | Kind::StaticMethod
                 | Kind::Constant
                 | Kind::Struct
                 | Kind::Enum
+                | Kind::EnumMember
                 | Kind::Trait
                 | Kind::Type
+                | Kind::TypeAlias
+                | Kind::Field
+                | Kind::Macro
+                | Kind::Union
+                | Kind::StaticVariable
         )
     }
 
@@ -523,11 +548,18 @@ mod tests {
         let accepted = [
             Kind::Method,
             Kind::Function,
+            Kind::StaticMethod,
             Kind::Constant,
             Kind::Struct,
             Kind::Enum,
+            Kind::EnumMember,
             Kind::Trait,
             Kind::Type,
+            Kind::TypeAlias,
+            Kind::Field,
+            Kind::Macro,
+            Kind::Union,
+            Kind::StaticVariable,
         ];
         for kind in &accepted {
             assert!(kind_accepted(*kind), "Kind {:?} should be accepted", kind);
@@ -536,7 +568,7 @@ mod tests {
 
     #[test]
     fn rejected_kinds() {
-        let rejected = [Kind::Field, Kind::Variable, Kind::Package, Kind::Module];
+        let rejected = [Kind::Variable, Kind::Package, Kind::Module];
         for kind in &rejected {
             assert!(!kind_accepted(*kind), "Kind {:?} should be rejected", kind);
         }
@@ -612,11 +644,18 @@ mod tests {
         for kind in [
             Kind::Method,
             Kind::Function,
+            Kind::StaticMethod,
             Kind::Constant,
             Kind::Struct,
             Kind::Enum,
+            Kind::EnumMember,
             Kind::Trait,
             Kind::Type,
+            Kind::TypeAlias,
+            Kind::Field,
+            Kind::Macro,
+            Kind::Union,
+            Kind::StaticVariable,
         ] {
             assert!(kind_accepted(kind), "Kind {:?} should be collected", kind);
         }
