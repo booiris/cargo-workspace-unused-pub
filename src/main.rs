@@ -29,14 +29,8 @@ fn has_test_or_main_attr(lines: &[impl AsRef<str>], def_line: usize, display_nam
             // unrelated attributes that happen to contain "test"/"main" as
             // substrings (e.g. #[serde(rename = "contest")]).
             // We check for common patterns: #[test], #[..::test], #[..::main]
-            let attr_body = trimmed
-                .trim_start_matches("#[")
-                .trim_end_matches(']');
-            let attr_name = attr_body
-                .split('(')
-                .next()
-                .unwrap_or(attr_body)
-                .trim();
+            let attr_body = trimmed.trim_start_matches("#[").trim_end_matches(']');
+            let attr_name = attr_body.split('(').next().unwrap_or(attr_body).trim();
             // attr_name is e.g. "test", "tokio::test", "tokio::main", "actix_web::main"
             if attr_name == "test"
                 || attr_name.ends_with("::test")
@@ -147,6 +141,20 @@ fn is_test_file(relative_path: &str) -> bool {
     path.components().any(|c| c.as_os_str() == "tests")
 }
 
+/// Check whether a SCIP symbol represents a trait impl method.
+/// rust-analyzer encodes trait impl methods as `impl#[StructName][TraitName]method()`,
+/// with two `[...]` brackets after `impl#`, while inherent impl methods have only one:
+/// `impl#[StructName]method()`.
+fn is_trait_impl_method(symbol: &str) -> bool {
+    if let Some(after_impl) = symbol.rsplit("impl#").next() {
+        // Count the number of `[...]` segments before the method descriptor
+        let bracket_count = after_impl.matches('[').count();
+        bracket_count >= 2
+    } else {
+        false
+    }
+}
+
 #[derive(Parser)]
 #[command(name = "cargo")]
 #[command(bin_name = "cargo")]
@@ -213,17 +221,13 @@ fn main_impl(args: MainFlags) -> anyhow::Result<()> {
     let index = scip::types::Index::parse_from_reader(&mut reader)?;
     debug!("Opened SCIP file with {} documents", index.documents.len());
 
-    // Record declarations and traits (keyed by SCIP symbol, not display_name)
+    // Record declarations (keyed by SCIP symbol, not display_name)
     let mut declarations = HashMap::<&String, &SymbolInformation>::default();
-    let mut trait_symbols = HashSet::<&String>::default();
     for doc in &index.documents {
         for s in &doc.symbols {
             let Ok(kind) = s.kind.enum_value() else {
                 continue;
             };
-            if kind == Kind::Trait {
-                trait_symbols.insert(&s.symbol);
-            }
             if !matches!(
                 kind,
                 Kind::Method
@@ -243,14 +247,15 @@ fn main_impl(args: MainFlags) -> anyhow::Result<()> {
             ) {
                 continue;
             }
+            // Skip trait impl methods — their pub visibility is dictated by the
+            // trait, not by the developer, so they are not truly "unused pub".
+            if is_trait_impl_method(&s.symbol) {
+                continue;
+            }
             declarations.insert(&s.symbol, s);
         }
     }
-    debug!(
-        "Found {} declarations and {} trait symbols",
-        declarations.len(),
-        trait_symbols.len()
-    );
+    debug!("Found {} declarations", declarations.len());
 
     // Record occurrences
     if args.skip_test_usages {
@@ -319,21 +324,6 @@ fn main_impl(args: MainFlags) -> anyhow::Result<()> {
     //   - trait methods (which may be called implicitly)
     let mut symbols_to_remove: HashSet<&String> = HashSet::new();
     for (doc, occ, info) in &def_positions {
-        // Trait method check: a trait impl method's SCIP symbol embeds the
-        // trait's own SCIP symbol path.  We check whether any trait symbol
-        // path (without scheme prefix) appears in the method symbol.
-        if trait_symbols.iter().any(|ts| {
-            // Extract the descriptor portion after the scheme + manager + package
-            // e.g. "rust-analyzer cargo crate 0.1.0 MyTrait#" → look for "MyTrait#"
-            // by finding the trait descriptor suffix that is embedded in impl symbols.
-            ts.split(' ')
-                .last()
-                .is_some_and(|trait_desc| info.symbol.contains(trait_desc))
-        }) {
-            symbols_to_remove.insert(&info.symbol);
-            continue;
-        }
-
         let rel_path: &str = &doc.relative_path;
         let full_path = args.workspace.join(rel_path);
         let lines = file_cache.entry(rel_path).or_insert_with(|| {
@@ -612,16 +602,38 @@ mod tests {
         assert_eq!(declarations.len(), 1, "Unreferenced symbol should remain");
     }
 
-    #[test]
-    fn trait_methods_filtered_in_pass2() {
-        let sym = "rust-analyzer crate 0.1.0 MyTrait#required().";
-        let info = make_symbol_info(sym, "required", Kind::Method);
-        let mut traits = HashSet::new();
-        let trait_name = "MyTrait".to_string();
-        traits.insert(&trait_name);
+    // ── is_trait_impl_method ────────────────────────────────────────
 
-        let is_trait_method = traits.iter().any(|t| info.symbol.contains(*t));
-        assert!(is_trait_method, "Trait method should be detected");
+    #[test]
+    fn detects_trait_impl_method_two_brackets() {
+        // impl#[StructName][TraitName]method() — trait impl
+        assert!(is_trait_impl_method(
+            "rust-analyzer cargo crate 0.1.0 impl#[SqliteTraceStore][TraceStore]save_trace()."
+        ));
+    }
+
+    #[test]
+    fn detects_external_trait_impl_method() {
+        // External trait (e.g. Display)
+        assert!(is_trait_impl_method(
+            "rust-analyzer cargo crate 0.1.0 impl#[MyStruct][`std::fmt::Display`]fmt()."
+        ));
+    }
+
+    #[test]
+    fn inherent_impl_method_not_filtered() {
+        // impl#[StructName]method() — inherent impl, only one bracket pair
+        assert!(!is_trait_impl_method(
+            "rust-analyzer cargo crate 0.1.0 impl#[SqlitePool]open()."
+        ));
+    }
+
+    #[test]
+    fn non_impl_symbol_not_filtered() {
+        // Regular function, no impl# at all
+        assert!(!is_trait_impl_method(
+            "rust-analyzer cargo crate 0.1.0 my_function()."
+        ));
     }
 
     #[test]
