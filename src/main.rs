@@ -107,6 +107,7 @@ fn is_inside_cfg_test(lines: &[impl AsRef<str>], line: usize) -> bool {
 
 /// For each line in the file, compute whether it falls inside a `#[cfg(test)]` block.
 /// Returns a Vec<bool> of the same length as `lines`.
+#[cfg(test)]
 fn compute_cfg_test_flags(lines: &[impl AsRef<str>]) -> Vec<bool> {
     let mut flags = vec![false; lines.len()];
     let mut cfg_test_depth: usize = 0;
@@ -161,8 +162,6 @@ struct Flags {
     workspace: PathBuf,
     #[clap(long)]
     scip: Option<PathBuf>,
-    #[clap(long, value_delimiter = ',', default_value = "rs,html")]
-    extensions: Vec<String>,
     /// Treat pub items that are only referenced from test code as unused.
     /// Test code includes `#[cfg(test)]` modules and files under `tests/` directories.
     #[clap(long)]
@@ -375,61 +374,6 @@ fn main_impl(args: MainFlags) -> anyhow::Result<()> {
         declarations.len()
     );
 
-    // Pass 3: Grep for candidates (word-boundary matching)
-    let word_patterns: HashMap<&String, regex::Regex> = declarations
-        .iter()
-        .map(|(sym, info)| {
-            let pat = format!(r"\b{}\b", regex::escape(&info.display_name));
-            (*sym, regex::Regex::new(&pat).unwrap())
-        })
-        .collect();
-    let mut counts = HashMap::<&String, usize>::default();
-    let skip_test = args.skip_test_usages;
-    let extensions: HashSet<String> = args.extensions.into_iter().collect();
-    walkdir::WalkDir::new(&args.workspace)
-        .min_depth(1)
-        .into_iter()
-        .filter_entry(|e| !e.path().join("CACHEDIR.TAG").exists())
-        .filter_map(|e| e.ok())
-        .filter(|f| {
-            f.file_type().is_file()
-                && f.path()
-                    .extension()
-                    .and_then(|f| f.to_str())
-                    .is_some_and(|e| extensions.contains(e))
-        })
-        .for_each(|f| {
-            let contents = std::fs::read_to_string(f.path()).unwrap();
-            let file_lines: Vec<&str> = contents.lines().collect();
-            let file_is_test = skip_test
-                && f.path()
-                    .strip_prefix(&args.workspace)
-                    .ok()
-                    .and_then(|p| p.to_str())
-                    .is_some_and(is_test_file);
-            // Precompute cfg(test) regions to avoid O(n²) scanning
-            let test_line_flags: Vec<bool> = if skip_test && !file_is_test {
-                compute_cfg_test_flags(&file_lines)
-            } else {
-                vec![]
-            };
-            for (line_idx, line) in file_lines.iter().enumerate() {
-                if skip_test
-                    && (file_is_test || test_line_flags.get(line_idx).copied().unwrap_or(false))
-                {
-                    continue;
-                }
-                for (sym, _info) in &declarations {
-                    if let Some(re) = word_patterns.get(sym) {
-                        if re.is_match(line) {
-                            *counts.entry(sym).or_default() += 1;
-                        }
-                    }
-                }
-            }
-        });
-    declarations.retain(|d, _| counts.get(d).copied().unwrap_or_default() <= 1);
-    debug!("Pass 3 (search): {} candidates", declarations.len());
     let n_found = declarations.len();
     info!("Found {} possibly unused pub items", n_found);
 
