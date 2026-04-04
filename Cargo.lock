@@ -79,6 +79,7 @@ dependencies = [
  "itertools",
  "log",
  "protobuf",
+ "regex",
  "scip",
  "walkdir",
 ]

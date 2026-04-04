@@ -25,7 +25,24 @@ fn has_test_or_main_attr(lines: &[impl AsRef<str>], def_line: usize, display_nam
             continue;
         }
         if trimmed.starts_with("#[") {
-            if trimmed.contains("test") || trimmed.contains("main") {
+            // Match test/main attributes but avoid false positives from
+            // unrelated attributes that happen to contain "test"/"main" as
+            // substrings (e.g. #[serde(rename = "contest")]).
+            // We check for common patterns: #[test], #[..::test], #[..::main]
+            let attr_body = trimmed
+                .trim_start_matches("#[")
+                .trim_end_matches(']');
+            let attr_name = attr_body
+                .split('(')
+                .next()
+                .unwrap_or(attr_body)
+                .trim();
+            // attr_name is e.g. "test", "tokio::test", "tokio::main", "actix_web::main"
+            if attr_name == "test"
+                || attr_name.ends_with("::test")
+                || attr_name == "main"
+                || attr_name.ends_with("::main")
+            {
                 return true;
             }
             // Other attributes — keep scanning
@@ -197,16 +214,16 @@ fn main_impl(args: MainFlags) -> anyhow::Result<()> {
     let index = scip::types::Index::parse_from_reader(&mut reader)?;
     debug!("Opened SCIP file with {} documents", index.documents.len());
 
-    // Record declarations and traits
+    // Record declarations and traits (keyed by SCIP symbol, not display_name)
     let mut declarations = HashMap::<&String, &SymbolInformation>::default();
-    let mut traits = HashSet::<&String>::default();
+    let mut trait_symbols = HashSet::<&String>::default();
     for doc in &index.documents {
         for s in &doc.symbols {
             let Ok(kind) = s.kind.enum_value() else {
                 continue;
             };
             if kind == Kind::Trait {
-                traits.insert(&s.display_name);
+                trait_symbols.insert(&s.symbol);
             }
             if !matches!(
                 kind,
@@ -231,9 +248,9 @@ fn main_impl(args: MainFlags) -> anyhow::Result<()> {
         }
     }
     debug!(
-        "Found {} declarations and {} traits",
+        "Found {} declarations and {} trait symbols",
         declarations.len(),
-        traits.len()
+        trait_symbols.len()
     );
 
     // Record occurrences
@@ -303,8 +320,17 @@ fn main_impl(args: MainFlags) -> anyhow::Result<()> {
     //   - trait methods (which may be called implicitly)
     let mut symbols_to_remove: HashSet<&String> = HashSet::new();
     for (doc, occ, info) in &def_positions {
-        // Trait method check
-        if traits.iter().any(|t| info.symbol.contains(*t)) {
+        // Trait method check: a trait impl method's SCIP symbol embeds the
+        // trait's own SCIP symbol path.  We check whether any trait symbol
+        // path (without scheme prefix) appears in the method symbol.
+        if trait_symbols.iter().any(|ts| {
+            // Extract the descriptor portion after the scheme + manager + package
+            // e.g. "rust-analyzer cargo crate 0.1.0 MyTrait#" → look for "MyTrait#"
+            // by finding the trait descriptor suffix that is embedded in impl symbols.
+            ts.split(' ')
+                .last()
+                .is_some_and(|trait_desc| info.symbol.contains(trait_desc))
+        }) {
             symbols_to_remove.insert(&info.symbol);
             continue;
         }
@@ -349,7 +375,14 @@ fn main_impl(args: MainFlags) -> anyhow::Result<()> {
         declarations.len()
     );
 
-    // Pass 3: Grep for candidates
+    // Pass 3: Grep for candidates (word-boundary matching)
+    let word_patterns: HashMap<&String, regex::Regex> = declarations
+        .iter()
+        .map(|(sym, info)| {
+            let pat = format!(r"\b{}\b", regex::escape(&info.display_name));
+            (*sym, regex::Regex::new(&pat).unwrap())
+        })
+        .collect();
     let mut counts = HashMap::<&String, usize>::default();
     let skip_test = args.skip_test_usages;
     let extensions: HashSet<String> = args.extensions.into_iter().collect();
@@ -386,9 +419,11 @@ fn main_impl(args: MainFlags) -> anyhow::Result<()> {
                 {
                     continue;
                 }
-                for d in declarations.values() {
-                    if line.contains(&d.display_name) {
-                        *counts.entry(&d.symbol).or_default() += 1;
+                for (sym, _info) in &declarations {
+                    if let Some(re) = word_patterns.get(sym) {
+                        if re.is_match(line) {
+                            *counts.entry(sym).or_default() += 1;
+                        }
                     }
                 }
             }
