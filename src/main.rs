@@ -180,6 +180,10 @@ struct Flags {
     /// Suppress log output (info, warn, debug messages).
     #[clap(long, short)]
     quiet: bool,
+    /// Also check for unused pub fields in structs and unused enum members.
+    /// By default these are excluded from detection.
+    #[clap(long)]
+    check_fields: bool,
 }
 
 fn main_impl(args: MainFlags) -> anyhow::Result<()> {
@@ -245,6 +249,10 @@ fn main_impl(args: MainFlags) -> anyhow::Result<()> {
                     | Kind::Union
                     | Kind::StaticVariable
             ) {
+                continue;
+            }
+            // Skip struct fields and enum members unless --check-fields is set
+            if !args.check_fields && matches!(kind, Kind::Field | Kind::EnumMember) {
                 continue;
             }
             // Skip trait impl methods — their pub visibility is dictated by the
