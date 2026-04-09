@@ -200,17 +200,9 @@ fn main_impl(args: MainFlags) -> anyhow::Result<()> {
         anyhow::bail!("{:?} does not contain a Cargo.toml file", args.workspace);
     }
     if args.force_regenerate && scip.exists() {
-        warn!(
-            "Force regeneration requested. Removing existing SCIP file at {:?}",
-            scip
-        );
         std::fs::remove_file(&scip)?;
     }
     if !scip.exists() {
-        warn!(
-            "SCIP file not found at {:?}. Generating with rust-analyzer. This may take a while for large workspaces.",
-            scip
-        );
         duct::cmd!("rust-analyzer", "scip", &args.workspace, "--output", &scip)
             .dir(&args.workspace)
             .stdout_null()
@@ -372,9 +364,6 @@ fn main_impl(args: MainFlags) -> anyhow::Result<()> {
         declarations.len()
     );
 
-    let n_found = declarations.len();
-    info!("Found {} possibly unused pub items", n_found);
-
     // Reuse definition positions collected earlier, filtered to remaining candidates
     let declarations_occurrences: Vec<(&String, &Occurrence)> = def_positions
         .iter()
@@ -388,6 +377,9 @@ fn main_impl(args: MainFlags) -> anyhow::Result<()> {
         .into_iter()
         .collect_vec();
     declarations_occurrences.sort_by_key(|(d, _)| *d);
+    // Count based on items that actually have displayable positions
+    let n_found: usize = declarations_occurrences.iter().map(|(_, occs)| occs.len()).sum();
+
     // Display
     for (path, mut occs) in declarations_occurrences {
         let full_path = args.workspace.join(path);
@@ -405,7 +397,11 @@ fn main_impl(args: MainFlags) -> anyhow::Result<()> {
         }
         println!();
     }
-    anyhow::ensure!(n_found == 0, "Found {} possibly unused pub items", n_found);
+    if n_found == 0 {
+        info!("No unused pub items found.");
+    } else {
+        anyhow::bail!("Found {} possibly unused pub items", n_found);
+    }
     Ok(())
 }
 
